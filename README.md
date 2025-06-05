@@ -1,8 +1,7 @@
 # uptime_monitor
 
 Simple CLI to log HTTP status, cache hits, TTFB, and full load time.
-Saves per-site tables in `website_stats.db`.
-Edit paths in `monitor.py` or run via `startup.sh`.
+The monitor stores `website_stats.db` and `urls.txt` in the directory it is run from.
 
 ## quick start
 ```
