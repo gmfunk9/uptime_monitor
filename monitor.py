@@ -31,10 +31,14 @@ class WebsiteMonitor:
         # Clear any existing handlers
         logger.handlers.clear()
         
-        # Create syslog handler for systemd journal
-        syslog_handler = logging.handlers.SysLogHandler(address='/dev/log')
-        syslog_handler.setFormatter(logging.Formatter('uptime_monitor: %(message)s'))
-        logger.addHandler(syslog_handler)
+        handler = None
+        if Path('/dev/log').exists():
+            handler = logging.handlers.SysLogHandler(address='/dev/log')
+        else:
+            handler = logging.StreamHandler()
+
+        handler.setFormatter(logging.Formatter('uptime_monitor: %(message)s'))
+        logger.addHandler(handler)
 
     def setup_database(self):
         """Create SQLite database and establish connection"""
@@ -52,8 +56,15 @@ class WebsiteMonitor:
             if not self.urls_file.exists():
                 raise FileNotFoundError(f"URLs file not found: {self.urls_file}")
             
-            with open(self.urls_file, "r") as file:
-                self.websites = [line.strip() for line in file if line.strip() and not line.startswith('#')]
+            self.websites = []
+            with open(self.urls_file, 'r') as file:
+                for raw in file:
+                    line = raw.strip()
+                    if not line:
+                        continue
+                    if line.startswith('#'):
+                        continue
+                    self.websites.append(line)
         except Exception as e:
             logging.error(f"Failed to read URLs file: {e}")
             raise
@@ -62,7 +73,9 @@ class WebsiteMonitor:
         """Validate URL format"""
         try:
             parsed = urlparse(url)
-            return bool(parsed.netloc) and parsed.scheme in ('http', 'https')
+            if not parsed.netloc:
+                return False
+            return parsed.scheme in ('http', 'https')
         except Exception:
             return False
 
@@ -192,12 +205,20 @@ class WebsiteMonitor:
         cf_status = stats.get("cf_cache_status", "").lower() if stats.get("cf_cache_status") else ""
         ls_status = stats.get("x_litespeed_cache", "").lower() if stats.get("x_litespeed_cache") else ""
         
-        # Consider it cached if either CF or LiteSpeed shows cache hit
-        is_cached = ("hit" in cf_status) or ("hit" in ls_status)
-        
-        if not is_cached and stats.get("response_code") == 200:
-            self.summary_stats['misses'] += 1
-            logging.info(f"{url}: Cache miss (CF: {cf_status or 'none'}, LS: {ls_status or 'none'})")
+        is_cached = False
+        if "hit" in cf_status:
+            is_cached = True
+        if "hit" in ls_status:
+            is_cached = True
+
+        if is_cached:
+            return
+        if stats.get("response_code") != 200:
+            return
+        self.summary_stats['misses'] += 1
+        logging.info(
+            f"{url}: Cache miss (CF: {cf_status or 'none'}, LS: {ls_status or 'none'})"
+        )
 
     def monitor_websites(self):
         """Monitor all websites and collect stats"""
@@ -207,36 +228,32 @@ class WebsiteMonitor:
             if not self.validate_url(website):
                 logging.error(f"Invalid URL format: {website}")
                 continue
-                
+
             self.summary_stats['total'] += 1
             domain = self.get_domain_name(website)
             if not domain:
                 logging.error(f"Could not extract domain from: {website}")
                 continue
-                
+
             start_time = datetime.datetime.now()
             response = self.send_request(website)
-            
-            if response is not None:
-                stats = self.get_website_stats(response, start_time)
-                self.consecutive_failures[domain] = 0  # Reset failure counter
-                
-                # Log non-200 responses
-                if stats["response_code"] != 200:
-                    logging.info(f"{website}: HTTP {stats['response_code']}")
-                
-                # Check cache status
-                self.check_cache_status(stats, website)
-                
-            else:
+
+            if response is None:
                 stats = self.get_error_stats()
                 self.summary_stats['errors'] += 1
                 self.consecutive_failures[domain] += 1
-                
-                # Warn about consecutive failures
                 if self.consecutive_failures[domain] >= 3:
-                    logging.warning(f"{website}: {self.consecutive_failures[domain]} consecutive failures")
-            
+                    logging.warning(
+                        f"{website}: {self.consecutive_failures[domain]} consecutive failures"
+                    )
+                self.save_website_stats(domain, timestamp, stats)
+                continue
+
+            stats = self.get_website_stats(response, start_time)
+            self.consecutive_failures[domain] = 0
+            if stats["response_code"] != 200:
+                logging.info(f"{website}: HTTP {stats['response_code']}")
+            self.check_cache_status(stats, website)
             self.save_website_stats(domain, timestamp, stats)
         
         self.conn.commit()
@@ -268,8 +285,9 @@ class WebsiteMonitor:
 
 
 if __name__ == "__main__":
+    base_dir = Path.cwd()
     monitor = WebsiteMonitor(
-        "/home/ffunk/PROJECTS/UPTIME_MONITOR/urls.txt",
-        "/home/ffunk/PROJECTS/UPTIME_MONITOR/website_stats.db"
+        base_dir / "urls.txt",
+        base_dir / "website_stats.db",
     )
     monitor.run()
