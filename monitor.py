@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import argparse
 import requests
 import datetime
 import logging.handlers
@@ -10,10 +11,11 @@ from collections import defaultdict
 
 
 class WebsiteMonitor:
-    def __init__(self, urls_file, db_file):
-        """Initialize with urls_file and db_file"""
+    def __init__(self, urls_file, db_file, scan_type="GET"):
+        """Initialize with urls_file, db_file and scan type"""
         self.urls_file = Path(urls_file)
         self.db_file = Path(db_file)
+        self.scan_type = scan_type
         self.websites = []
         self.conn = None
         self.website_stats = {}
@@ -81,9 +83,12 @@ class WebsiteMonitor:
 
     def send_request(self, url):
         """Send HTTP request and return response"""
+        method = requests.get
+        if self.scan_type == "HEAD":
+            method = requests.head
         try:
-            response = requests.get(
-                url, 
+            response = method(
+                url,
                 headers={"User-Agent": "Mozilla/5.0 (uptime-monitor)"},
                 timeout=30,
                 allow_redirects=True
@@ -102,15 +107,25 @@ class WebsiteMonitor:
         response_code = website_response.status_code
         cf_cache_status = website_response.headers.get("cf-cache-status")
         x_litespeed_cache = website_response.headers.get("x-litespeed-cache")
+
+        if self.scan_type == "HEAD":
+            return {
+                "response_code": response_code,
+                "cf_cache_status": cf_cache_status,
+                "x_litespeed_cache": x_litespeed_cache,
+                "ttfb": None,
+                "total": None,
+            }
+
         ttfb = round(website_response.elapsed.total_seconds(), 3)
         total_time = round((datetime.datetime.now() - start_time).total_seconds(), 3)
-        
+
         return {
             "response_code": response_code,
             "cf_cache_status": cf_cache_status,
             "x_litespeed_cache": x_litespeed_cache,
             "ttfb": ttfb,
-            "total": total_time
+            "total": total_time,
         }
 
     def get_error_stats(self):
@@ -285,9 +300,14 @@ class WebsiteMonitor:
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--scan-type", choices=["HEAD", "GET"], default="GET")
+    args = parser.parse_args()
+
     base_dir = Path.cwd()
     monitor = WebsiteMonitor(
         base_dir / "urls.txt",
         base_dir / "website_stats.db",
+        args.scan_type,
     )
     monitor.run()
